@@ -1,12 +1,14 @@
-import { useEffect, useState, type FormEvent } from "react";import { useNavigate } from "react-router-dom";
+import { useEffect, useState, type FormEvent } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
+import { supabaseClient } from "../../config/supabase";
 
 const BASE = "https://just-a-labback.vercel.app";
 
 interface Store { id: string; name: string; is_open: boolean; }
 interface Product { id: string; name: string; price: number; }
-interface OrderItem { quantity: number; products: { name: string; price: number; }; }
-interface Order { id: string; status: string; consumer_id: string; order_items: OrderItem[]; }
+interface OrderItem { quantity: number; products: { name: string; price: number } }
+interface Order { id: string; status: string; consumer_id: string; order_items: OrderItem[] }
 
 export const StoreDashboard = () => {
   const { token, user, logout } = useAuth();
@@ -16,6 +18,7 @@ export const StoreDashboard = () => {
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [form, setForm] = useState({ name: "", price: "" });
+  const [toast, setToast] = useState("");
 
   const headers = { Authorization: `Bearer ${token}` };
 
@@ -23,7 +26,7 @@ export const StoreDashboard = () => {
     const res = await fetch(`${BASE}/stores`, { headers });
     const data = await res.json();
     const mine = data.find((s: Store & { user_id: string }) => s.user_id === user?.id);
-    setStore(mine);
+    setStore(mine ?? null);
     if (mine) {
       getProducts(mine.id);
       getOrders(mine.id);
@@ -41,6 +44,34 @@ export const StoreDashboard = () => {
   };
 
   useEffect(() => { getStore(); }, []);
+
+  // Escuchar cambios de estado en tiempo real via Broadcast
+  useEffect(() => {
+    if (!store) return;
+
+    const channel = supabaseClient.channel(`store:${store.id}`);
+    channel
+      .on("broadcast", { event: "order-accepted" }, ({ payload }) => {
+        setOrders((prev) =>
+          prev.map((o) => o.id === payload.orderId ? { ...o, status: "En entrega" } : o)
+        );
+        showToast(`🚴 Pedido #${payload.orderId} en camino`);
+      })
+      .on("broadcast", { event: "order-delivered" }, ({ payload }) => {
+        setOrders((prev) =>
+          prev.map((o) => o.id === payload.orderId ? { ...o, status: "Entregado" } : o)
+        );
+        showToast(`✅ Pedido #${payload.orderId} entregado`);
+      })
+      .subscribe();
+
+    return () => { supabaseClient.removeChannel(channel); };
+  }, [store?.id]);
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(""), 4000);
+  };
 
   const toggleStore = async () => {
     if (!store) return;
@@ -68,36 +99,83 @@ export const StoreDashboard = () => {
 
   const handleLogout = () => { logout(); navigate("/login"); };
 
+  const statusBadge = (status: string) => {
+    const map: Record<string, { bg: string; label: string }> = {
+      "Creado":     { bg: "#3b82f6", label: "🆕 Creado"     },
+      "En entrega": { bg: "#f59e0b", label: "🚴 En entrega" },
+      "Entregado":  { bg: "#22c55e", label: "✅ Entregado"  },
+    };
+    const { bg, label } = map[status] ?? { bg: "#6b7280", label: status };
+    return (
+      <span style={{ background: bg, color: "#fff", padding: "3px 12px", borderRadius: 12, fontSize: 12, fontWeight: "bold" }}>
+        {label}
+      </span>
+    );
+  };
+
   return (
-    <div>
-      <h1>{store?.name} Dashboard</h1>
-      <button onClick={handleLogout}>Logout</button>
-      <h2>Store Status: {store?.is_open ? "🟢 Open" : "🔴 Closed"}</h2>
-      <button onClick={toggleStore}>{store?.is_open ? "Close Store" : "Open Store"}</button>
-      <h2>Create Product</h2>
-      <form onSubmit={createProduct}>
-        <input placeholder="Product name" value={form.name}
-          onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        <input type="number" placeholder="Price" value={form.price}
-          onChange={(e) => setForm({ ...form, price: e.target.value })} />
-        <button type="submit">Create</button>
+    <div style={{ maxWidth: 700, margin: "0 auto", padding: 16 }}>
+
+      {toast && (
+        <div style={{ position: "fixed", top: 16, right: 16, background: "#1e293b", color: "#fff", padding: "10px 18px", borderRadius: 8, zIndex: 999 }}>
+          {toast}
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h1 style={{ fontSize: 22 }}>🏪 {store?.name ?? "Mi Tienda"}</h1>
+        <button onClick={handleLogout}>Logout</button>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <span style={{ fontWeight: "bold" }}>
+          Estado: {store?.is_open ? "🟢 Abierta" : "🔴 Cerrada"}
+        </span>
+        <button onClick={toggleStore}>
+          {store?.is_open ? "Cerrar tienda" : "Abrir tienda"}
+        </button>
+      </div>
+
+      <h2>Agregar producto</h2>
+      <form onSubmit={createProduct} style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <input
+          placeholder="Nombre del producto"
+          value={form.name}
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+          style={{ flex: 1, padding: "4px 8px" }}
+        />
+        <input
+          type="number"
+          placeholder="Precio"
+          value={form.price}
+          onChange={(e) => setForm({ ...form, price: e.target.value })}
+          style={{ width: 90, padding: "4px 8px" }}
+        />
+        <button type="submit">Crear</button>
       </form>
-      <h2>Products</h2>
-      {products.length === 0 && <p>No products yet</p>}
+
+      <h2>Productos</h2>
+      {products.length === 0 && <p style={{ color: "#888" }}>Sin productos</p>}
       {products.map((p) => (
-        <div key={p.id}>
+        <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}>
           <span>{p.name} — ${p.price}</span>
-          <button onClick={() => deleteProduct(p.id)}>Delete</button>
+          <button onClick={() => deleteProduct(p.id)}>🗑 Eliminar</button>
         </div>
       ))}
-      <h2>Incoming Orders</h2>
-      {orders.length === 0 && <p>No orders yet</p>}
+
+      <h2 style={{ marginTop: 20 }}>Pedidos entrantes</h2>
+      {orders.length === 0 && <p style={{ color: "#888" }}>Sin pedidos</p>}
       {orders.map((order) => (
-        <div key={order.id}>
-          <p>Order #{order.id} — {order.status}</p>
-          {order.order_items?.map((item, i) => (
-            <p key={i}>• {item.products?.name} x{item.quantity}</p>
-          ))}
+        <div key={order.id} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <span style={{ fontSize: 13, color: "#888" }}>#{order.id}</span>
+            {statusBadge(order.status)}
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 14 }}>
+            {order.order_items?.map((item, i) => (
+              <li key={i}>{item.products?.name} × {item.quantity}</li>
+            ))}
+          </ul>
         </div>
       ))}
     </div>
