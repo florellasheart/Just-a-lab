@@ -1,18 +1,28 @@
 import { supabase } from "../config/supabase.js";
+import { OrderStatus } from "../types/orderStatus.js";
 
 export const createOrder = async (req, res) => {
-  const { store_id, items } = req.body;
+  const { store_id, items, lat, lng } = req.body;
   const consumer_id = req.user.id;
 
   if (!store_id || !items || items.length === 0) {
     return res.status(400).json({ error: "store_id and items[] are required" });
   }
+  if (lat == null || lng == null) {
+    return res.status(400).json({ error: "lat y lng son requeridos" });
+  }
 
   const { data: order, error: orderError } = await supabase
     .from("orders")
-    .insert({ consumer_id, store_id, status: "pending" })
+    .insert({
+      consumer_id,
+      store_id,
+      status: OrderStatus.CREATED,
+      destination: `SRID=4326;POINT(${lng} ${lat})`,
+    })
     .select()
     .single();
+
   if (orderError) return res.status(500).json({ error: orderError.message });
 
   const orderItems = items.map((item) => ({
@@ -21,12 +31,23 @@ export const createOrder = async (req, res) => {
     quantity: item.quantity,
   }));
 
-  const { error: itemsError } = await supabase
-    .from("order_items")
-    .insert(orderItems);
+  const { error: itemsError } = await supabase.from("order_items").insert(orderItems);
   if (itemsError) return res.status(500).json({ error: itemsError.message });
 
   res.status(201).json({ message: "Order created", order });
+};
+
+export const getOrderById = async (req, res) => {
+  const { id } = req.params;
+
+  const { data, error } = await supabase.rpc("get_order_with_coords", {
+    p_order_id: Number(id),
+  });
+
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data || data.length === 0) return res.status(404).json({ error: "Order not found" });
+
+  res.json(data[0]);
 };
 
 export const getOrdersByConsumer = async (req, res) => {
@@ -37,26 +58,20 @@ export const getOrdersByConsumer = async (req, res) => {
   }
 
   const { data, error } = await supabase
-    .from("order_items")
+    .from("orders")
     .select(`
-      order_id,
-      quantity,
-      orders!inner ( id, status, store_id, consumer_id ),
-      products ( name, price )
+      id,
+      status,
+      store_id,
+      delivery_id,
+      stores ( name ),
+      order_items ( quantity, products ( name, price ) )
     `)
-    .eq("orders.consumer_id", consumerId);
+    .eq("consumer_id", consumerId)
+    .order("id", { ascending: false });
 
   if (error) return res.status(500).json({ error: error.message });
-
-  const formatted = data.map((item) => ({
-    order_id: item.order_id,
-    product_name: item.products?.name,
-    price: item.products?.price,
-    quantity: item.quantity,
-    status: item.orders?.status,
-  }));
-
-  res.json(formatted);
+  res.json(data);
 };
 
 export const getOrdersByStore = async (req, res) => {
@@ -68,6 +83,7 @@ export const getOrdersByStore = async (req, res) => {
     .eq("id", storeId)
     .eq("user_id", req.user.id)
     .single();
+
   if (!store) return res.status(403).json({ error: "Unauthorized" });
 
   const { data, error } = await supabase
@@ -96,7 +112,9 @@ export const deleteOrder = async (req, res) => {
 
   if (!order) return res.status(404).json({ error: "Order not found" });
   if (order.consumer_id !== req.user.id) return res.status(403).json({ error: "Unauthorized" });
-  if (order.status !== "pending") return res.status(400).json({ error: "Only pending orders can be cancelled" });
+  if (order.status !== OrderStatus.CREATED) {
+    return res.status(400).json({ error: "Solo se pueden cancelar órdenes en estado Creado" });
+  }
 
   await supabase.from("order_items").delete().eq("order_id", id);
   await supabase.from("orders").delete().eq("id", id);
