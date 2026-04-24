@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { MapContainer, TileLayer, Marker, useMap } from "react-leaflet";
 import L from "leaflet";
@@ -34,12 +34,11 @@ interface ActiveOrder {
   destination_lng: number;
 }
 
-// Componente que mueve el mapa cuando cambia la posición
 const MapFollower = ({ position }: { position: { lat: number; lng: number } }) => {
   const map = useMap();
   useEffect(() => {
     map.panTo([position.lat, position.lng], { animate: true, duration: 0.3 });
-  }, [position.lat, position.lng]);
+  }, [position.lat, position.lng, map]);
   return null;
 };
 
@@ -53,43 +52,44 @@ export const DeliveryDashboard = () => {
   const [position, setPosition] = useState(CALI);
   const [delivered, setDelivered] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
-  const [mapKey, setMapKey] = useState(0); // fuerza re-mount del mapa al aceptar orden
+  const [mapKey, setMapKey] = useState(0);
 
-  // Refs para evitar stale closures en el listener de teclado
-  const positionRef = useRef(CALI);
+  const positionRef    = useRef(CALI);
   const activeOrderRef = useRef<ActiveOrder | null>(null);
-  const deliveredRef = useRef(false);
-  const tokenRef = useRef(token);
-  const channelRef = useRef<ReturnType<typeof supabaseClient.channel> | null>(null);
-  const throttleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deliveredRef   = useRef(false);
+  const tokenRef       = useRef(token);
+  const channelRef     = useRef<ReturnType<typeof supabaseClient.channel> | null>(null);
+  const throttleRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingPosition = useRef(CALI);
 
-  // Mantener refs sincronizados
-  useEffect(() => { positionRef.current = position; }, [position]);
+  useEffect(() => { positionRef.current = position; },     [position]);
   useEffect(() => { activeOrderRef.current = activeOrder; }, [activeOrder]);
-  useEffect(() => { deliveredRef.current = delivered; }, [delivered]);
-  useEffect(() => { tokenRef.current = token; }, [token]);
+  useEffect(() => { deliveredRef.current = delivered; },   [delivered]);
+  useEffect(() => { tokenRef.current = token; },           [token]);
 
-  const getAvailable = async () => {
+  // Guardar fetchs en refs para llamarlos desde dentro del listener sin stale closure
+  const fetchAvailable = useRef(async () => {
     const res = await fetch(`${BASE}/delivery/orders/available`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${tokenRef.current}` },
     });
     const data = await res.json();
     setAvailable(Array.isArray(data) ? data : []);
-  };
+  });
 
-  const getHistory = async () => {
+  const fetchHistory = useRef(async () => {
     const res = await fetch(`${BASE}/delivery/orders/accepted`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${tokenRef.current}` },
     });
     const data = await res.json();
     setHistory(Array.isArray(data) ? data : []);
-  };
+  });
 
-  useEffect(() => { getAvailable(); getHistory(); }, []);
+  useEffect(() => {
+    fetchAvailable.current();
+    fetchHistory.current();
+  }, []);
 
-  // Envía PATCH al backend con la posición actual (lo que el profe exige)
-  const doUpdatePosition = useCallback(async (pos: { lat: number; lng: number }) => {
+  const doUpdatePosition = useRef(async (pos: { lat: number; lng: number }) => {
     const order = activeOrderRef.current;
     if (!order || deliveredRef.current) return;
 
@@ -105,19 +105,24 @@ export const DeliveryDashboard = () => {
 
       const data = await res.json();
 
+      // Broadcast posición al consumer
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "position-update",
+        payload: { lat: pos.lat, lng: pos.lng },
+      });
+
       if (data.arrived) {
         deliveredRef.current = true;
         setDelivered(true);
         setStatusMsg("✅ ¡Pedido entregado!");
 
-        // Notificar al consumer via broadcast
         channelRef.current?.send({
           type: "broadcast",
           event: "order-delivered",
           payload: { orderId: String(order.id) },
         });
 
-        // Notificar a la store
         const storeChannel = supabaseClient.channel(`store:${order.store_id}`);
         storeChannel.subscribe((status: string) => {
           if (status === "SUBSCRIBED") {
@@ -129,25 +134,22 @@ export const DeliveryDashboard = () => {
           }
         });
 
-        getHistory();
+        fetchHistory.current();
       }
     } catch (err) {
       console.error("Error actualizando posición:", err);
     }
-  }, []);
+  });
 
-  // ⭐ LISTENER DE TECLADO — el corazón del movimiento
+  // Listener de teclado — usa solo refs, sin dependencias de estado
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Solo funciona si hay orden activa y no fue entregada
       if (!activeOrderRef.current || deliveredRef.current) return;
 
       const arrows = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
       if (!arrows.includes(e.key)) return;
+      e.preventDefault();
 
-      e.preventDefault(); // evita scroll de página
-
-      // Calcula nueva posición basándose en la ref (siempre actualizada)
       let { lat, lng } = positionRef.current;
       switch (e.key) {
         case "ArrowUp":    lat += STEP; break;
@@ -157,16 +159,13 @@ export const DeliveryDashboard = () => {
       }
 
       const newPos = { lat, lng };
-
-      // 1. Actualiza el marcador en el mapa INMEDIATAMENTE
       setPosition(newPos);
-      positionRef.current = newPos;
+      positionRef.current   = newPos;
       pendingPosition.current = newPos;
 
-      // 2. Throttle: máximo 1 PATCH por segundo al backend
       if (throttleRef.current) return;
       throttleRef.current = setTimeout(() => {
-        doUpdatePosition(pendingPosition.current);
+        doUpdatePosition.current(pendingPosition.current);
         throttleRef.current = null;
       }, 1000);
     };
@@ -179,7 +178,7 @@ export const DeliveryDashboard = () => {
         throttleRef.current = null;
       }
     };
-  }, []); // [] porque todo se lee desde refs, no hay stale closure
+  }, []);
 
   const acceptOrder = async (id: string) => {
     const res = await fetch(`${BASE}/delivery/orders/${id}/accept`, {
@@ -189,13 +188,11 @@ export const DeliveryDashboard = () => {
     const data = await res.json();
     if (!res.ok) { alert(data.error); return; }
 
-    // Canal del pedido para broadcast al consumer
     if (channelRef.current) supabaseClient.removeChannel(channelRef.current);
     const channel = supabaseClient.channel(`order:${id}`);
     channel.subscribe();
     channelRef.current = channel;
 
-    // Notificar a la store que el pedido fue aceptado
     const storeChannel = supabaseClient.channel(`store:${data.store_id}`);
     storeChannel.subscribe((status: string) => {
       if (status === "SUBSCRIBED") {
@@ -207,29 +204,28 @@ export const DeliveryDashboard = () => {
       }
     });
 
-    const newActiveOrder = {
-      id: data.id,
-      store_id: data.store_id,
-      store_name: data.store_name,
+    const newActiveOrder: ActiveOrder = {
+      id:              data.id,
+      store_id:        data.store_id,
+      store_name:      data.store_name,
       destination_lat: data.destination_lat,
       destination_lng: data.destination_lng,
     };
 
-    // Reset posición al aceptar
     const startPos = CALI;
     setPosition(startPos);
-    positionRef.current = startPos;
+    positionRef.current     = startPos;
     pendingPosition.current = startPos;
-    deliveredRef.current = false;
+    deliveredRef.current    = false;
 
     setActiveOrder(newActiveOrder);
     activeOrderRef.current = newActiveOrder;
     setDelivered(false);
     setStatusMsg("");
-    setMapKey((k) => k + 1); // fuerza re-mount del mapa con centro correcto
+    setMapKey((k) => k + 1);
 
-    getAvailable();
-    getHistory();
+    fetchAvailable.current();
+    fetchHistory.current();
   };
 
   const handleLogout = () => {
@@ -240,18 +236,12 @@ export const DeliveryDashboard = () => {
 
   const statusBadge = (status: string) => {
     const colors: Record<string, string> = {
-      "Creado": "#3b82f6",
+      "Creado":     "#3b82f6",
       "En entrega": "#f59e0b",
-      "Entregado": "#22c55e",
+      "Entregado":  "#22c55e",
     };
     return (
-      <span style={{
-        background: colors[status] ?? "#6b7280",
-        color: "#fff",
-        padding: "2px 10px",
-        borderRadius: 12,
-        fontSize: 12,
-      }}>
+      <span style={{ background: colors[status] ?? "#6b7280", color: "#fff", padding: "2px 10px", borderRadius: 12, fontSize: 12 }}>
         {status}
       </span>
     );
@@ -264,7 +254,6 @@ export const DeliveryDashboard = () => {
         <button onClick={handleLogout}>Logout</button>
       </div>
 
-      {/* ⭐ SECCIÓN ACTIVA: mapa con movimiento de teclas */}
       {activeOrder && (
         <div style={{ border: "2px solid #7c3aed", borderRadius: 10, padding: 14, marginBottom: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -278,7 +267,7 @@ export const DeliveryDashboard = () => {
 
           {!delivered && (
             <div style={{ background: "#f3f0ff", border: "1px solid #7c3aed", borderRadius: 6, padding: "8px 12px", marginBottom: 8, fontSize: 13, color: "#5b21b6" }}>
-              ⌨️ Usa <strong>← ↑ ↓ →</strong> para mover el repartidor. Llega al marcador 🟢 verde.
+              ⌨️ Usa <strong>← ↑ ↓ →</strong> para moverte. Llega al marcador 🟢 verde.
             </div>
           )}
 
@@ -287,7 +276,6 @@ export const DeliveryDashboard = () => {
             🟢 Destino: {activeOrder.destination_lat.toFixed(6)}, {activeOrder.destination_lng.toFixed(6)}
           </p>
 
-          {/* key={mapKey} fuerza re-mount limpio al aceptar nueva orden */}
           <MapContainer
             key={mapKey}
             center={[position.lat, position.lng]}
@@ -296,13 +284,8 @@ export const DeliveryDashboard = () => {
           >
             <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
             <MapFollower position={position} />
-            {/* Marcador azul = repartidor */}
             <Marker position={[position.lat, position.lng]} />
-            {/* Marcador verde = destino del pedido */}
-            <Marker
-              position={[activeOrder.destination_lat, activeOrder.destination_lng]}
-              icon={destinationIcon}
-            />
+            <Marker position={[activeOrder.destination_lat, activeOrder.destination_lng]} icon={destinationIcon} />
           </MapContainer>
 
           {delivered && (
@@ -313,17 +296,9 @@ export const DeliveryDashboard = () => {
                 setDelivered(false);
                 deliveredRef.current = false;
                 setStatusMsg("");
-                getAvailable();
+                fetchAvailable.current();
               }}
-              style={{
-                marginTop: 10,
-                background: "#6b7280",
-                color: "#fff",
-                padding: "8px 16px",
-                border: "none",
-                borderRadius: 6,
-                cursor: "pointer",
-              }}
+              style={{ marginTop: 10, background: "#6b7280", color: "#fff", padding: "8px 16px", border: "none", borderRadius: 6, cursor: "pointer" }}
             >
               Volver a la lista
             </button>
@@ -331,13 +306,10 @@ export const DeliveryDashboard = () => {
         </div>
       )}
 
-      {/* Lista de pedidos disponibles */}
       {!activeOrder && (
         <>
           <h2>Pedidos disponibles</h2>
-          {available.length === 0 && (
-            <p style={{ color: "#888", fontStyle: "italic" }}>No hay pedidos disponibles ahora</p>
-          )}
+          {available.length === 0 && <p style={{ color: "#888", fontStyle: "italic" }}>No hay pedidos disponibles ahora</p>}
           {available.map((order) => (
             <div key={order.id} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, marginBottom: 10 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
@@ -351,15 +323,7 @@ export const DeliveryDashboard = () => {
               </ul>
               <button
                 onClick={() => acceptOrder(order.id)}
-                style={{
-                  background: "#7c3aed",
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: 6,
-                  padding: "6px 16px",
-                  cursor: "pointer",
-                  fontWeight: "bold",
-                }}
+                style={{ background: "#7c3aed", color: "#fff", border: "none", borderRadius: 6, padding: "6px 16px", cursor: "pointer", fontWeight: "bold" }}
               >
                 🛵 Aceptar pedido
               </button>
@@ -368,19 +332,10 @@ export const DeliveryDashboard = () => {
         </>
       )}
 
-      {/* Historial */}
       <h2 style={{ marginTop: 20 }}>Mis entregas</h2>
       {history.length === 0 && <p style={{ color: "#888" }}>Ninguna aún</p>}
       {history.map((order) => (
-        <div key={order.id} style={{
-          border: "1px solid #e5e7eb",
-          borderRadius: 8,
-          padding: 10,
-          marginBottom: 8,
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}>
+        <div key={order.id} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 10, marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ fontSize: 14 }}>#{order.id} — {order.stores?.name}</span>
           {statusBadge(order.status)}
         </div>
