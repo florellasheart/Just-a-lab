@@ -6,7 +6,6 @@ import "leaflet/dist/leaflet.css";
 import { useAuth } from "../../context/AuthContext";
 import { supabaseClient } from "../../config/supabase";
 
-// Fix iconos de Leaflet con Vite
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png",
@@ -29,13 +28,12 @@ interface Product { id: string; name: string; price: number; }
 interface CartItem { product_id: string; name: string; quantity: number; }
 interface OrderItem { quantity: number; products: { name: string; price: number } }
 interface Order {
-  id: string;
+  id: number;
   status: string;
   stores: { name: string };
   order_items: OrderItem[];
 }
 
-// Componente que captura el click en el mapa
 const MapClickHandler = ({ onSelect }: { onSelect: (lat: number, lng: number) => void }) => {
   useMapEvents({ click: (e) => onSelect(e.latlng.lat, e.latlng.lng) });
   return null;
@@ -51,7 +49,7 @@ export const ConsumerDashboard = () => {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [destination, setDestination] = useState<{ lat: number; lng: number } | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
-  const [trackingOrderId, setTrackingOrderId] = useState<string | null>(null);
+  const [trackingOrderId, setTrackingOrderId] = useState<number | null>(null);
   const [trackingDest, setTrackingDest] = useState<{ lat: number; lng: number } | null>(null);
   const [deliveryPos, setDeliveryPos] = useState<{ lat: number; lng: number } | null>(null);
   const [toast, setToast] = useState("");
@@ -107,7 +105,12 @@ export const ConsumerDashboard = () => {
     await fetch(`${BASE}/orders`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ store_id: selectedStore?.id, items: cart, lat: destination.lat, lng: destination.lng }),
+      body: JSON.stringify({
+        store_id: selectedStore?.id,
+        items: cart,
+        lat: destination.lat,
+        lng: destination.lng,
+      }),
     });
     setCart([]);
     setSelectedStore(null);
@@ -116,13 +119,12 @@ export const ConsumerDashboard = () => {
     getOrders();
   };
 
-  const deleteOrder = async (orderId: string) => {
+  const deleteOrder = async (orderId: number) => {
     await fetch(`${BASE}/orders/${orderId}`, { method: "DELETE", headers });
     getOrders();
   };
 
-  // Abrir tracking: llama al backend para obtener coordenadas y suscribe al canal
-  const openTracking = async (orderId: string) => {
+  const openTracking = async (orderId: number) => {
     const res = await fetch(`${BASE}/orders/${orderId}`, { headers });
     const data = await res.json();
 
@@ -134,7 +136,6 @@ export const ConsumerDashboard = () => {
         : null
     );
 
-    // Suscribirse al canal de broadcast de ese pedido
     const channel = supabaseClient.channel(`order:${orderId}`);
     channel
       .on("broadcast", { event: "position-update" }, ({ payload }) => {
@@ -142,7 +143,10 @@ export const ConsumerDashboard = () => {
       })
       .on("broadcast", { event: "order-delivered" }, () => {
         setToast("🎉 ¡Tu pedido ha llegado!");
-        setOrders((prev) => prev.map((o) => o.id === orderId ? { ...o, status: "Entregado" } : o));
+        // Comparar como string para evitar mismatch número/string
+        setOrders((prev) =>
+          prev.map((o) => String(o.id) === String(orderId) ? { ...o, status: "Entregado" } : o)
+        );
         setTimeout(() => setToast(""), 5000);
       })
       .subscribe();
@@ -183,7 +187,6 @@ export const ConsumerDashboard = () => {
         <button onClick={handleLogout}>Logout</button>
       </div>
 
-      {/* Tiendas / Productos / Carrito */}
       {!selectedStore ? (
         <>
           <h2>Tiendas abiertas</h2>
@@ -219,7 +222,6 @@ export const ConsumerDashboard = () => {
             </div>
           ))}
 
-          {/* Mapa para elegir destino */}
           <h3>📍 Elige tu punto de entrega</h3>
           <p style={{ fontSize: 13, color: "#666" }}>Haz click en el mapa para seleccionar dónde quieres recibir el pedido.</p>
           <MapContainer center={[CALI.lat, CALI.lng]} zoom={14} style={{ height: 280, borderRadius: 6 }}>
@@ -240,7 +242,6 @@ export const ConsumerDashboard = () => {
         </>
       )}
 
-      {/* Mapa de tracking */}
       {trackingOrderId && trackingDest && (
         <div style={{ border: "2px solid #3b82f6", borderRadius: 8, padding: 12, marginTop: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -257,7 +258,6 @@ export const ConsumerDashboard = () => {
         </div>
       )}
 
-      {/* Mis pedidos */}
       <h2 style={{ marginTop: 28 }}>Mis pedidos</h2>
       {orders.length === 0 && <p>No tienes pedidos aún</p>}
       {orders.map((order) => (

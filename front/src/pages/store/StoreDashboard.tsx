@@ -5,10 +5,10 @@ import { supabaseClient } from "../../config/supabase";
 
 const BASE = "https://just-a-labback.vercel.app";
 
-interface Store { id: string; name: string; is_open: boolean; }
-interface Product { id: string; name: string; price: number; }
+interface Store { id: number; name: string; is_open: boolean; }
+interface Product { id: number; name: string; price: number; }
 interface OrderItem { quantity: number; products: { name: string; price: number } }
-interface Order { id: string; status: string; consumer_id: string; order_items: OrderItem[] }
+interface Order { id: number; status: string; consumer_id: string; order_items: OrderItem[] }
 
 export const StoreDashboard = () => {
   const { token, user, logout } = useAuth();
@@ -33,33 +33,33 @@ export const StoreDashboard = () => {
     }
   };
 
-  const getProducts = async (storeId: string) => {
+  const getProducts = async (storeId: number) => {
     const res = await fetch(`${BASE}/products/store/${storeId}`, { headers });
     setProducts(await res.json());
   };
 
-  const getOrders = async (storeId: string) => {
+  const getOrders = async (storeId: number) => {
     const res = await fetch(`${BASE}/orders/store/${storeId}`, { headers });
     setOrders(await res.json());
   };
 
   useEffect(() => { getStore(); }, []);
 
-  // Escuchar cambios de estado en tiempo real via Broadcast
   useEffect(() => {
     if (!store) return;
 
     const channel = supabaseClient.channel(`store:${store.id}`);
     channel
       .on("broadcast", { event: "order-accepted" }, ({ payload }) => {
+        // Comparar como string para evitar mismatch número/string
         setOrders((prev) =>
-          prev.map((o) => o.id === payload.orderId ? { ...o, status: "En entrega" } : o)
+          prev.map((o) => String(o.id) === String(payload.orderId) ? { ...o, status: "En entrega" } : o)
         );
         showToast(`🚴 Pedido #${payload.orderId} en camino`);
       })
       .on("broadcast", { event: "order-delivered" }, ({ payload }) => {
         setOrders((prev) =>
-          prev.map((o) => o.id === payload.orderId ? { ...o, status: "Entregado" } : o)
+          prev.map((o) => String(o.id) === String(payload.orderId) ? { ...o, status: "Entregado" } : o)
         );
         showToast(`✅ Pedido #${payload.orderId} entregado`);
       })
@@ -92,7 +92,7 @@ export const StoreDashboard = () => {
     getProducts(store.id);
   };
 
-  const deleteProduct = async (id: string) => {
+  const deleteProduct = async (id: number) => {
     await fetch(`${BASE}/products/${id}`, { method: "DELETE", headers });
     if (store) getProducts(store.id);
   };
@@ -115,7 +115,6 @@ export const StoreDashboard = () => {
 
   return (
     <div style={{ maxWidth: 700, margin: "0 auto", padding: 16 }}>
-
       {toast && (
         <div style={{ position: "fixed", top: 16, right: 16, background: "#1e293b", color: "#fff", padding: "10px 18px", borderRadius: 8, zIndex: 999 }}>
           {toast}

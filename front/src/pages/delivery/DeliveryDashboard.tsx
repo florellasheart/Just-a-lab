@@ -88,9 +88,22 @@ export const DeliveryDashboard = () => {
     const data = await res.json();
     if (!res.ok) { alert(data.error); return; }
 
+    // Canal del pedido — el consumer lo escucha
     const channel = supabaseClient.channel(`order:${id}`);
     channel.subscribe();
     channelRef.current = channel;
+
+    // Notificar a la store que el pedido fue aceptado
+    const storeChannel = supabaseClient.channel(`store:${data.store_id}`);
+    storeChannel.subscribe((status: string) => {
+      if (status === "SUBSCRIBED") {
+        storeChannel.send({
+          type: "broadcast",
+          event: "order-accepted",
+          payload: { orderId: String(id) },
+        });
+      }
+    });
 
     setActiveOrder({
       id: data.id,
@@ -118,6 +131,7 @@ export const DeliveryDashboard = () => {
     });
     const data = await res.json();
 
+    // Broadcast posición al consumer
     channelRef.current?.send({
       type: "broadcast",
       event: "position-update",
@@ -128,11 +142,26 @@ export const DeliveryDashboard = () => {
       deliveredRef.current = true;
       setDelivered(true);
       setStatusMsg("✅ ¡Pedido entregado!");
+
+      // Notificar al consumer
       channelRef.current?.send({
         type: "broadcast",
         event: "order-delivered",
-        payload: { orderId: order.id },
+        payload: { orderId: String(order.id) },
       });
+
+      // Notificar a la store
+      const storeChannel = supabaseClient.channel(`store:${order.store_id}`);
+      storeChannel.subscribe((status: string) => {
+        if (status === "SUBSCRIBED") {
+          storeChannel.send({
+            type: "broadcast",
+            event: "order-delivered",
+            payload: { orderId: String(order.id) },
+          });
+        }
+      });
+
       getHistory();
     }
   };
